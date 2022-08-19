@@ -1,14 +1,14 @@
 import ml_collections as mlc
 
-text_cfg = mlc.ConfigDict()
-text_cfg.project = "Custom_Accelerate_Trainer_Tests" # wandb project name
-text_cfg.log_to_wandb = True
-text_cfg.train_batch_size = 32
-text_cfg.val_batch_size = 32
-text_cfg.model_ckpt = "roberta-base"
-text_cfg.learning_rate = 3e-5
+cfg = mlc.ConfigDict()
+cfg.project = "Custom_Accelerate_Trainer_Tests" # wandb project name
+cfg.log_to_wandb = True
+cfg.train_batch_size = 32
+cfg.val_batch_size = 32
+cfg.model_ckpt = "roberta-base"
+cfg.learning_rate = 3e-5
 
-text_cfg.trainer_args = dict(
+cfg.trainer_args = dict(
     output_dir="./outputs",
     num_train_epochs=5,
     gradient_accumulation_steps=1,
@@ -21,3 +21,8 @@ text_cfg.trainer_args = dict(
     save_weights_only=True,
     metric_for_best_model="val/accuracy"
 )
+
+
+
+def get_config():
+    return cfg

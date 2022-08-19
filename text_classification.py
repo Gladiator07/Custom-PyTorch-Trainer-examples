@@ -2,14 +2,13 @@ import os
 
 os.environ["TOKENIZERS_PARALLELISM"]="false"
 import datasets
-# os.environ["CUBLAS_WORKSPACE_CONFIG"]=":4096:2"
 import numpy as np
 import torch
 import torch.nn as nn
 import transformers
 from absl import app, flags
 from accelerate import Accelerator
-from datasets import load_dataset, load_metric
+from datasets import load_dataset
 from ml_collections import config_flags
 from sklearn.metrics import accuracy_score, f1_score
 from torch.utils.data import DataLoader
@@ -19,7 +18,6 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from src.trainer import Trainer, TrainerArguments
 from src.utils import set_seed
 
-set_seed(42)
 config_flags.DEFINE_config_file(
     "config",
     default=None,
@@ -50,6 +48,8 @@ class Model(nn.Module):
 
 def main(argv):
     del argv
+    set_seed(42)
+
     # init 🤗 accelerator
     accelerator = Accelerator(
             device_placement=True,
