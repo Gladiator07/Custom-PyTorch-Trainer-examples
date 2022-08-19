@@ -1,4 +1,5 @@
 import os
+import sys
 
 os.environ["TOKENIZERS_PARALLELISM"]="false"
 import datasets
@@ -17,8 +18,6 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 # custom modules
 from src.trainer import Trainer, TrainerArguments
 from src.utils import set_seed
-import sys
-sys.path.append(".")
 config_flags.DEFINE_config_file(
     "config",
     default=None,
