@@ -132,7 +132,6 @@ def main():
 
     # call .fit to perform training + validation
     trainer.fit()
-    trainer = Trainer(model, args)
 
     # predict on test set if you have one
     # preds = trainer.predict("./outputs/best_model.bin", test_dataloader)
