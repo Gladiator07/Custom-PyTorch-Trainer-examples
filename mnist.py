@@ -27,22 +27,39 @@ FLAGS(sys.argv)   # need to explicitly to tell flags library to parse argv befor
 cfg = FLAGS.config
 wandb_enabled = FLAGS.wandb_enabled
 
-# Create Fully connected network
-class NN(nn.Module):
-    def _init_(self, input_size, num_classes):
-        super(NN, self)._init_()
-        self.fc1 = nn.Linear(input_size, 50)
-        self.fc2 = nn.Linear(50, num_classes)
+class CNN(nn.Module):
+    def __init__(self, in_channels=1, num_classes=10):
+        super(CNN, self).__init__()
+        self.conv1 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=8,
+            kernel_size=(3, 3),
+            stride=(1, 1),
+            padding=(1, 1),
+        )
+        self.pool = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
+        self.conv2 = nn.Conv2d(
+            in_channels=8,
+            out_channels=16,
+            kernel_size=(3, 3),
+            stride=(1, 1),
+            padding=(1, 1),
+        )
+        self.fc1 = nn.Linear(16 * 7 * 7, num_classes)
 
     def forward(self, image, label=None):
-        x = image.view(-1)
-        out = F.relu(self.fc1(x))
-        out = self.fc2(x)
+        x = F.relu(self.conv1(x))
+        x = self.pool(x)
+        x = F.relu(self.conv2(x))
+        x = self.pool(x)
+        x = x.reshape(x.shape[0], -1)
+        out = self.fc1(x)
+
         if label is not None:
             loss = nn.CrossEntropyLoss()(out, label)
+
             return out, loss
         return out
-
 
 class MNISTDataset:
     def __init__(self, dataset):
@@ -83,7 +100,7 @@ def main():
 
 
     # Initialize the network
-    model = NN(input_size=cfg.input_size, num_classes=cfg.num_classes)
+    model = CNN(input_size=cfg.in_channels, num_classes=cfg.num_classes)
 
     # optimizer
     optimizer = optim.Adam(model.parameters(), lr=cfg.learning_rate)

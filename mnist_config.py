@@ -4,7 +4,7 @@ cfg = mlc.ConfigDict()
 cfg.project = "Custom_Accelerate_Trainer_Tests" # wandb project name
 cfg.log_to_wandb = True
 # Hyperparameters
-cfg.input_size = 784
+cfg.in_channels = 1
 cfg.num_classes = 10
 cfg.learning_rate = 0.001
 cfg.batch_size = 64
