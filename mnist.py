@@ -48,6 +48,7 @@ class CNN(nn.Module):
         self.fc1 = nn.Linear(16 * 7 * 7, num_classes)
 
     def forward(self, image, label=None):
+        x = image
         x = F.relu(self.conv1(x))
         x = self.pool(x)
         x = F.relu(self.conv2(x))
@@ -91,16 +92,16 @@ def main():
         accelerator.init_trackers(project_name="Custom_Accelerate_Trainer_Tests", config=cfg.to_dict())
     
     # Load Data
-    train_dataset = datasets.MNIST(root = "dataset/MNIST", train=True, transform=transforms.ToTensor(), download=True)
+    train_dataset = MNISTDataset(datasets.MNIST(root = "dataset/MNIST", train=True, transform=transforms.ToTensor(), download=True))
     train_loader = DataLoader(dataset = train_dataset, batch_size=cfg.batch_size, shuffle=True)
     accelerator.print(f"Train Loader = {train_loader}")
 
-    val_dataset = datasets.MNIST(root = "dataset/MNIST", train=False, transform=transforms.ToTensor(), download=True)
+    val_dataset = MNISTDataset(datasets.MNIST(root = "dataset/MNIST", train=False, transform=transforms.ToTensor(), download=True))
     val_loader = DataLoader(dataset = val_dataset, batch_size=cfg.batch_size, shuffle=False)
 
 
     # Initialize the network
-    model = CNN(input_size=cfg.in_channels, num_classes=cfg.num_classes)
+    model = CNN(in_channels=cfg.in_channels, num_classes=cfg.num_classes)
 
     # optimizer
     optimizer = optim.Adam(model.parameters(), lr=cfg.learning_rate)
@@ -141,5 +142,5 @@ def main():
         accelerator.end_training()
 
 
-if __name__ == "_main_":
+if __name__ == "__main__":
     main()
