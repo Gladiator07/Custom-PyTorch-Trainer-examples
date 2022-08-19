@@ -48,7 +48,8 @@ class Model(nn.Module):
             return logits, loss
         return logits
 
-def main():
+def main(argv):
+    del argv
     # init 🤗 accelerator
     accelerator = Accelerator(
             device_placement=True,
@@ -158,4 +159,4 @@ def main():
         accelerator.end_training()
 
 if __name__ == "__main__":
-    main()
+    app.run(main)
