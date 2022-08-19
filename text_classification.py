@@ -17,7 +17,8 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 # custom modules
 from src.trainer import Trainer, TrainerArguments
 from src.utils import set_seed
-
+import sys
+sys.path.append(".")
 config_flags.DEFINE_config_file(
     "config",
     default=None,
@@ -26,6 +27,7 @@ config_flags.DEFINE_config_file(
 flags.DEFINE_bool("wandb_enabled", default=True, help="enable Weights & Biases logging")
 
 FLAGS = flags.FLAGS
+FLAGS(sys.argv)   # need to explicitly to tell flags library to parse argv before you can access FLAGS.xxx
 cfg = FLAGS.config
 wandb_enabled = FLAGS.wandb_enabled
 
@@ -44,8 +46,7 @@ class Model(nn.Module):
             return logits, loss
         return logits
 
-def main(argv):
-    del argv
+def main():
     set_seed(42)
 
     # init 🤗 accelerator
@@ -157,4 +158,4 @@ def main(argv):
         accelerator.end_training()
 
 if __name__ == "__main__":
-    app.run(main)
+    main()
