@@ -27,8 +27,6 @@ flags.DEFINE_bool("wandb_enabled", default=True, help="enable Weights & Biases l
 
 FLAGS = flags.FLAGS
 cfg = FLAGS.config
-debug = FLAGS.debug
-fold = FLAGS.fold
 wandb_enabled = FLAGS.wandb_enabled
 
 class Model(nn.Module):
