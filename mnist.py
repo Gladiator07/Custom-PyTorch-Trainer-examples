@@ -12,9 +12,11 @@ from absl import app, flags
 from accelerate import Accelerator
 from ml_collections import config_flags
 
+
 # custom modules
 from src.trainer import Trainer, TrainerArguments
 from src.utils import set_seed
+
 config_flags.DEFINE_config_file(
     "config",
     default=None,
@@ -87,10 +89,10 @@ def main():
             gradient_accumulation_steps=cfg.trainer_args['gradient_accumulation_steps'],
             log_with="wandb" if wandb_enabled else None,
         )
-    if wandb_enabled:
-        # init wandb
+
+    if accelerator.is_main_process:
         accelerator.init_trackers(project_name="Custom_Accelerate_Trainer_Tests", config=cfg.to_dict())
-    
+
     # Load Data
     train_dataset = MNISTDataset(datasets.MNIST(root = "dataset/MNIST", train=True, transform=transforms.ToTensor(), download=True))
     train_loader = DataLoader(dataset = train_dataset, batch_size=cfg.batch_size, shuffle=True)

@@ -2,6 +2,7 @@ import os
 import random
 
 import numpy as np
+import slack
 import torch
 
 
@@ -40,6 +41,7 @@ class AverageMeter(object):
     def __str__(self):
         fmtstr = "{name} {val" + self.fmt + "} ({avg" + self.fmt + "})"
         return fmtstr.format(**self.__dict__)
+
 
 def asHours(seconds: float) -> str:
     """
