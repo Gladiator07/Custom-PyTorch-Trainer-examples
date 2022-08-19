@@ -2,7 +2,6 @@ import os
 import random
 
 import numpy as np
-import slack
 import torch
 
 
