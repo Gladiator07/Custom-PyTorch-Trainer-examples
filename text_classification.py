@@ -1,4 +1,5 @@
 import os
+
 os.environ["TOKENIZERS_PARALLELISM"]="false"
 import datasets
 # os.environ["CUBLAS_WORKSPACE_CONFIG"]=":4096:2"
@@ -6,21 +7,31 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
+from absl import app, flags
 from accelerate import Accelerator
 from datasets import load_dataset, load_metric
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
-from transformers import ( AutoModelForSequenceClassification,
-                          AutoTokenizer, get_linear_schedule_with_warmup)
-
-from config import text_cfg as cfg
-
+from ml_collections import config_flags
 from sklearn.metrics import accuracy_score, f1_score
-from scipy.special import softmax
+from torch.utils.data import DataLoader
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
 # custom modules
 from src.trainer import Trainer, TrainerArguments
 from src.utils import set_seed
+
 set_seed(42)
+config_flags.DEFINE_config_file(
+    "config",
+    default=None,
+    help_string="Training Configuration from `configs` directory",
+)
+flags.DEFINE_bool("wandb_enabled", default=True, help="enable Weights & Biases logging")
+
+FLAGS = flags.FLAGS
+cfg = FLAGS.config
+debug = FLAGS.debug
+fold = FLAGS.fold
+wandb_enabled = FLAGS.wandb_enabled
 
 class Model(nn.Module):
     def __init__(self):
@@ -44,10 +55,11 @@ def main():
             step_scheduler_with_optimizer=False,
             mixed_precision=cfg.trainer_args['mixed_precision'],
             gradient_accumulation_steps=cfg.trainer_args['gradient_accumulation_steps'],
-            log_with="wandb",
+            log_with="wandb" if wandb_enabled else None,
         )
-    # init wandb
-    accelerator.init_trackers(project_name="Custom_Accelerate_Trainer_Tests", config=cfg.to_dict())
+    if wandb_enabled:
+        # init wandb
+        accelerator.init_trackers(project_name="Custom_Accelerate_Trainer_Tests", config=cfg.to_dict())
     
     # disable logging on all processes except main
     if accelerator.is_local_main_process:
@@ -141,8 +153,9 @@ def main():
     metrics = compute_metrics(preds, tokenized_datasets["test"]["label"])
     accelerator.print(f"Test metrics: {metrics}")
     
-    # end trackers
-    accelerator.end_training()
+    if wandb_enabled:
+        # end trackers
+        accelerator.end_training()
 
 if __name__ == "__main__":
     main()
