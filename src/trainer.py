@@ -2,40 +2,22 @@
 # https://huggingface.co/docs/transformers/main_classes/trainer
 # https://github.com/abhishekkrthakur/tez
 
+from typing import Callable, Dict, Optional, Union
+import os
 import gc
 import math
 import time
-import os
+from pathlib import Path
+from tqdm.auto import tqdm
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Union
 
 import numpy as np
 import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
 from transformers import get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup
 
-from src.utils import AverageMeter, asHours
-
-"""
-TODO:
-[x] Print valuation metrics nicely after each epoch
-[x] Add clip_grad_norm to training loop
-[x] Make sure that loss calculated is correct
-[x] Maybe pass even the dataloaders to the class to keep the class simple and less cluttered
-[x] Add saving and loading of model checkpoint (handle with care in distributed settings)
-[x] Maybe wrap up the math around scheduler in a private method
-[x] Add a predict method which can perform prediction from loading a model state. Example: `trainer.predict(path, dataloader)`
-[x] Check optimization stuff (total training steps, accumulation , lr scheduler)
-[x] Add Weights & Biases logging (handle with care in distributed settings
-[x] Add a `final_summary` method which will print/log the complete summary (best and last metric/loss scores, total time taken, etc, etc)
-[ ] Test the code thoroughly with multi-GPU setup
-[ ] Test the code thoroughly with TPU setup
-[ ] Check the code completely once (if any mistakes, correct them)
-[ ] Add type hints
-[ ] Add docstrings 😛
-"""
+from utils import AverageMeter, asHours
 
 
 @dataclass
@@ -48,7 +30,6 @@ class EvalOutput:
     logits: np.ndarray
     labels: np.ndarray
     metrics: Dict[str, float]
-    loss: float
 
 
 @dataclass
@@ -71,6 +52,7 @@ class TrainerArguments:
     save_last_checkpoint: Optional[bool] = True
     save_weights_only: Optional[bool] = True
     metric_for_best_model: Optional[str] = "accuracy"
+    load_best_model_at_end: Optional[bool] = False
 
 
 """
@@ -79,14 +61,13 @@ For now no plan to make it fully generalizable, just copy paste this file and mo
 """
 
 
-@dataclass
 class Trainer:
     def __init__(
         self,
         model: torch.nn.Module,  # model is required
-        args: TrainerArguments = None,  # args is required
+        args: Optional[TrainerArguments] = None,
         # passing from outside for now to have the flexibility to modify param groups
-        optimizer: torch.optim = None,
+        optimizer: Optional[torch.optim.Optimizer] = None,
         accelerator: Optional[Accelerator] = None,
         train_dataloader: Optional[DataLoader] = None,
         val_dataloader: Optional[DataLoader] = None,
@@ -95,11 +76,12 @@ class Trainer:
     ):
         """
         NOTE:
-        🤗 `accelerator` should be initialized at the start of the `main` function or train script
+        🤗 `accelerator` should be initialized at the start of the `main()` function or train script
         and then passed to the initialization of this class. This design decision is made because
         dataset preparation/logging will be done multiple times on all cores in distributed settings (especially on TPUs).
-        To have the flexibility of doing it on the main process, accelerator should be initialized at the start of the training script.
-        Also, logging to wandb is more convenient as wandb can be initialized at the start of the script to capture all of the logs
+        To have the flexibility of doing it on the main process and leveraging the functionalities of 🤗 Accelerate,
+        accelerator should be initialized at the start of the training script.
+        Also, logging to W&B is more convenient as it can be initialized at the start of the script to capture all console logs
         and not have to wait until `trainer.fit()`
         """
 
@@ -119,7 +101,7 @@ class Trainer:
         self._trn_loss_meter = AverageMeter("train_loss", ":.4e")
         self._val_loss_meter = AverageMeter("val_loss", ":.4e")
         self._current_epoch = 0
-        self._completed_steps = 0
+        self._global_step = 0
         self._epoch_time = 0
         self._start_time = 0
         self._current_epoch_train_loss = 0.0
@@ -155,10 +137,20 @@ class Trainer:
         self.total_samples = len(self.train_dataloader.dataset)
 
         if self.accelerator is None:
-            raise Exception("🤗 Accelerator object not found, pass it to the class' init")
+            raise Exception(
+                "🤗 Accelerator object not found, it is required while calling `.fit()` method, pass it to the class' init"
+            )
 
         # not putting any checks if train_dataloader or val_dataloader is present or not
         # as this method is explicitly used by `.fit()` which requires both dataloaders
+        num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.args.gradient_accumulation_steps)
+        self.num_train_steps = self.args.num_train_epochs * num_update_steps_per_epoch
+        if isinstance(self.args.num_warmup_steps, float):
+            self.args.num_warmup_steps = math.ceil(self.args.num_warmup_steps * self.num_train_steps)
+        self.lr_scheduler = self._set_scheduler(
+            num_warmup_steps=self.args.num_warmup_steps * self.args.gradient_accumulation_steps,
+            num_train_steps=self.num_train_steps * self.args.gradient_accumulation_steps,
+        )
 
         # prepare for distributed training aka put everything in 🤗 Accelerate 🚀
         (
@@ -166,30 +158,28 @@ class Trainer:
             self.optimizer,
             self.train_dataloader,
             self.val_dataloader,
-        ) = self.accelerator.prepare(self.model, self.optimizer, self.train_dataloader, self.val_dataloader)
+            self.lr_scheduler,
+        ) = self.accelerator.prepare(
+            self.model, self.optimizer, self.train_dataloader, self.val_dataloader, self.lr_scheduler
+        )
 
         # TODO: handle weight tying of model after pushed to XLA device here
         # https://github.com/pytorch/xla/blob/master/TROUBLESHOOTING.md#xla-tensor-quirks
 
-        # re-calculate total training steps and epoch as the size of the training dataloader may have changed.
-        self.num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.args.gradient_accumulation_steps)
-        self.num_train_steps = self.args.num_train_epochs * self.num_update_steps_per_epoch
-        self.args.num_train_epochs = math.ceil(self.num_train_steps / self.num_update_steps_per_epoch)
-
-        if isinstance(self.args.num_warmup_steps, float):
-            self.args.num_warmup_steps = math.ceil(self.args.num_warmup_steps * self.num_train_steps)
+        # re-calculate total training steps as length of dataloader might have changed
+        num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.args.gradient_accumulation_steps)
+        self.num_train_steps = self.args.num_train_epochs * num_update_steps_per_epoch
+        self.args.num_train_epochs = math.ceil(self.num_train_steps / num_update_steps_per_epoch)
 
         self.total_batch_size = (
             self.per_device_train_batch_size * self.accelerator.num_processes * self.args.gradient_accumulation_steps
         )
-        # set learning rate scheduler
-        self.lr_scheduler = self._set_scheduler(self.args.num_warmup_steps, self.num_train_steps)
 
-    def _set_scheduler(self, num_warmup_steps, num_train_steps):
+    def _set_scheduler(self, num_warmup_steps: int, num_train_steps: int):
         """
-        Call after `accelerator.prepare`
+        Call after `accelerator.prepare` and calculating the total train steps after `prepare`
         """
-        # define linear/cosine scheduler
+
         if self.args.scheduler_type == "cosine":
             lr_scheduler = get_cosine_schedule_with_warmup(
                 self.optimizer,
@@ -206,6 +196,9 @@ class Trainer:
         return lr_scheduler
 
     def _init_global_progress_bar(self):
+        """
+        Global Progress bar to show the progress of the complete training
+        """
         self.global_prog_bar = tqdm(
             range(self.num_train_steps),
             disable=not self.accelerator.is_main_process,
@@ -215,33 +208,34 @@ class Trainer:
 
     def train_one_epoch(self, dataloader: DataLoader):
         """
-        Trains the model for one epoch and return the average loss
+        Trains the model for one epoch and returns the average loss
         Note: the model must return the loss from its forward function
         """
 
         self._trn_loss_meter.reset()
         self.model.train()
 
-        for step, batch in enumerate(dataloader):
+        for batch in dataloader:
             with self.accelerator.accumulate(self.model):
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
                 _, loss = self.model(**batch)
                 self.accelerator.backward(loss)
                 if self.accelerator.sync_gradients:
                     self.accelerator.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
                 self.optimizer.step()
                 self.lr_scheduler.step()
+                # gather and average loss across all processes
                 step_loss_gathered = self.accelerator.gather(loss).mean().item()
                 self._trn_loss_meter.update(
                     step_loss_gathered * self.args.gradient_accumulation_steps, batch["label"].size(0)
                 )
-                if self.accelerator.sync_gradients:
-                    self.global_prog_bar.set_postfix(loss=self._trn_loss_meter.avg)
-                    self.global_prog_bar.update(1)
-                    self._completed_steps += 1
+            if self.accelerator.sync_gradients:
+                self.global_prog_bar.set_postfix(loss=self._trn_loss_meter.avg)
+                self.global_prog_bar.update(1)
+                self._global_step += 1
 
-                    if self._wandb:
-                        self.accelerator.log({"train/loss": self._trn_loss_meter.val}, step=self._completed_steps)
+                if self._wandb:
+                    self.accelerator.log({"train/loss": self._trn_loss_meter.val}, step=self._global_step)
 
         # log average epoch loss
         if self._wandb:
@@ -252,7 +246,7 @@ class Trainer:
         return self._trn_loss_meter.avg
 
     @torch.no_grad()
-    def evaluate(self, dataloader):
+    def evaluate(self, dataloader: DataLoader):
         all_logits = []
         all_labels = []
         self._val_loss_meter.reset()
@@ -263,7 +257,9 @@ class Trainer:
             desc="Running Validation",
         )
         self.model.eval()
-        for step, batch in enumerate(dataloader):
+        for batch in dataloader:
+            # required if `.evaluate()` is called independently
+            batch = {k: v.to(self.accelerator.device) for k, v in batch.items()}
             logits, loss = self.model(**batch)
             step_loss_gathered = self.accelerator.gather(loss).mean().item()
             self._val_loss_meter.update(step_loss_gathered, batch["label"].size(0))
@@ -280,7 +276,7 @@ class Trainer:
         if self._wandb:
             self.accelerator.log({"val/loss": self._val_loss_meter.avg})
             self.accelerator.log(val_metrics)
-        return EvalOutput(all_logits, all_labels, val_metrics, self._val_loss_meter.avg)
+        return EvalOutput(all_logits, all_labels, val_metrics)
 
     def fit(self):
         """
@@ -298,7 +294,7 @@ class Trainer:
             self._current_epoch += 1
             self._current_val_metrics.update(eval_outs.metrics)
             self._current_epoch_train_loss = trn_epoch_loss
-            self._current_epoch_val_loss = eval_outs.loss
+            self._current_epoch_val_loss = self._val_loss_meter.avg
 
             # save best model
             if self.args.save_best_checkpoint:
@@ -309,7 +305,6 @@ class Trainer:
                         path=os.path.join(self.args.output_dir, "best_model.bin"),
                         weights_only=self.args.save_weights_only,
                     )
-            self._cleanup()
 
             self._epoch_time = asHours(time.time() - epoch_start_time)
             self._log_epoch_summary()
@@ -322,11 +317,15 @@ class Trainer:
                 weights_only=self.args.save_weights_only,
             )
 
+        # if load_best_model is True
+        if self.args.load_best_model_at_end:
+            self.load_model(weights_only=True, load_best_model=True)
+
         self._train_end_log_msg()
         self._full_cleanup()
 
     @torch.no_grad()
-    def predict(self, checkpoint_path: str, test_dataloader: Optional[DataLoader] = None):
+    def predict(self, checkpoint_path: Union[str, Path], test_dataloader: Optional[DataLoader] = None):
         if test_dataloader is not None:
             self.test_dataloader = test_dataloader
         if self.test_dataloader is None:
@@ -342,14 +341,12 @@ class Trainer:
             self.accelerator = None
 
         # turn off wandb for inference (generally this function is used offline on Kaggle)
-        self._wandb, self.args.log_to_wandb = False, False
+        self._wandb = False
         # reinit accelerator
         self._init_accelerator()
 
-        # load model
-        if self.accelerator.is_main_process:
-            model_dict = torch.load(checkpoint_path, map_location="cpu")
-            self.model.load_state_dict(model_dict)
+        # load best or last model
+        self.load_model(checkpoint_path, weights_only=True)
 
         # init and prepare accelerator
         self.model, self.test_dataloader = self.accelerator.prepare(self.model, self.test_dataloader)
@@ -359,7 +356,7 @@ class Trainer:
             range(len(self.test_dataloader)), disable=not self.accelerator.is_main_process, desc="Running Prediction"
         )
         all_logits = []
-        for step, batch in enumerate(self.test_dataloader):
+        for batch in self.test_dataloader:
             logits, _ = self.model(**batch)
             all_logits.append(self.accelerator.gather_for_metrics(logits).cpu().numpy())
             predict_pbar.update(1)
@@ -367,7 +364,7 @@ class Trainer:
         all_logits = np.concatenate(all_logits)
         return all_logits
 
-    def save_model(self, path: str, weights_only: Optional[bool] = False):
+    def save_model(self, path: Union[str, Path], weights_only: Optional[bool] = False):
         self.accelerator.wait_for_everyone()
         model_state_dict = self.accelerator.unwrap_model(self.model).state_dict()
         if weights_only:
@@ -386,8 +383,33 @@ class Trainer:
                 path,
             )
 
+    def load_model(
+        self,
+        path: Union[str, Path] = None,
+        weights_only: Optional[bool] = False,
+        load_best_model: Optional[bool] = False,
+    ):
+        """
+        Loads the model from the given path (pass best_model as True to load best checkpoint)
+        """
+        if path is None:
+            if load_best_model:
+                path = os.path.join(self.args.output_dir, "best_model.bin")
+            else:
+                # load last model
+                path = os.path.join(self.args.output_dir, "last_model.bin")
+
+        if self.accelerator.is_main_process:
+            model_dict = torch.load(path, map_location="cpu")
+            if weights_only:
+                self.accelerator.unwrap_model(self.model).load_state_dict(model_dict)
+            else:
+                self.accelerator.unwrap_model(self.model).load_state_dict(model_dict["state_dict"])
+                self.optimizer.load_state_dict(model_dict["optimizer"])
+
     def _train_startup_log_msg(self):
         self.accelerator.print("***** Running training *****")
+        self.accelerator.print(f"  Mixed Precision = {self.args.mixed_precision}")
         self.accelerator.print(f"  Num Samples = {self.total_samples}")
         self.accelerator.print(f"  Num Epochs = {self.args.num_train_epochs}")
         self.accelerator.print(f"  Instantaneous batch size per device = {self.per_device_train_batch_size}")
@@ -429,3 +451,4 @@ class Trainer:
     def _full_cleanup(self):
         self.accelerator.clear()
         gc.collect()
+        torch.cuda.empty_cache()
